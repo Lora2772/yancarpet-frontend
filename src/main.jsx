@@ -1009,9 +1009,22 @@ function OrdersPage() {
     (async () => {
       try {
         setLoading(true); setErr("");
-        const data = await api("/orders", { auth: true }); // 期望后端返回 [{orderId,status,totalAmount,createdAt,items:[...]}]
+
+        // 如果后端已经提供分页的 /orders/history?page=0&size=10（需要鉴权）
+        const page = await api(`/orders/history?page=0&size=10`, { auth: true });
+
+        // 兼容几种常见返回结构：
+        // 1) Spring Data Page: { content: [...], totalElements, ... }
+        // 2) 数组直接返回: [...]
+        // 3) 包在 data/items 的情况
+        const rows =
+          Array.isArray(page) ? page :
+          Array.isArray(page?.content) ? page.content :
+          Array.isArray(page?.items) ? page.items :
+          [];
+
         if (!keep) return;
-        setList(Array.isArray(data) ? data : []);
+        setList(rows);
       } catch (e) {
         if (keep) setErr(e.message);
       } finally {
@@ -1031,7 +1044,9 @@ function OrdersPage() {
         {list.map(o => (
           <div key={o.orderId} style={{ background:"#fff", border:`1px solid ${S._border}`, borderRadius:12, padding:12 }}>
             <div style={{ fontWeight:800 }}>Order {o.orderId}</div>
-            <div style={S.muted}>Status: {o.status} · Total: ${Number(o.totalAmount||0).toFixed(2)} · {o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}</div>
+            <div style={S.muted}>
+              Status: {o.status} · Total: ${Number(o.totalAmount||0).toFixed(2)} · {o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}
+            </div>
             <div style={{ marginTop: 8 }}>
               {(o.items||[]).map((it, idx) => (
                 <div key={idx} style={{ padding:"4px 0", borderBottom:"1px dashed #eee" }}>
@@ -1045,6 +1060,7 @@ function OrdersPage() {
     </div>
   );
 }
+
 
 
 /* ================= Styles ================= */
