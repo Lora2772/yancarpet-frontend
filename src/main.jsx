@@ -1,15 +1,14 @@
-import React, { useEffect, useMemo, useState, useContext, createContext, useRef } from "react";
+import React, { useEffect, useMemo, useState, useContext, createContext } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Link, useNavigate, useParams, useLocation } from "react-router-dom";
 
-// === Global theme (put near the top) ===
+/* ================= Theme & Global ================= */
 const THEME = { BG: "#EAE2D6", ACCENT: "#A65B2F", HERO_HEIGHT: 440 };
 
-
-// 全局样式：底色 & nav hover 下划线
 const GlobalStyle = () => (
   <style>{`
-    body { background: ${THEME.BG}; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: ${THEME.BG}; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
     a.nav { text-decoration: none; }
     a.nav:hover { text-decoration: underline; }
   `}</style>
@@ -19,7 +18,6 @@ const GlobalStyle = () => (
 const API_BASE = (window.__API_BASE__ ?? "http://localhost:8080").replace(/\/$/, "");
 
 /* ================= Helpers ================= */
-// 统一把商品图片转成代理地址
 function getImageSrc(p) {
   const raw = p?.imageUrl || p?.image || p?.img || "";
   return raw
@@ -30,15 +28,17 @@ function getImageSrc(p) {
 async function api(path, { method = "GET", body, auth = false } = {}) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem("yan_token");
-  if (auth && token) headers["Authorization"] = `Bearer ${token}`;
-  const res = await fetch(`${API_BASE}${path}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
+
+  if (auth) {
+    if (!token) throw new Error("Not signed in (missing JWT). Please sign in first.");
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const url = `${API_BASE}${path}`;
+  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
   if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`HTTP ${res.status}: ${txt}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status}: ${txt || res.statusText}`);
   }
   const ct = res.headers.get("content-type") || "";
   return ct.includes("application/json") ? res.json() : res.text();
@@ -46,12 +46,46 @@ async function api(path, { method = "GET", body, auth = false } = {}) {
 
 function useDebounced(value, delay = 300) {
   const [v, setV] = useState(value);
-  useEffect(() => {
-    const t = setTimeout(() => setV(value), delay);
-    return () => clearTimeout(t);
-  }, [value, delay]);
+  useEffect(() => { const t = setTimeout(() => setV(value), delay); return () => clearTimeout(t); }, [value, delay]);
   return v;
 }
+
+/* ================= Favorites ================= */
+const FavCtx = createContext(null);
+
+function FavoritesProvider({ children }) {
+  const [skus, setSkus] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("yan_favs") || "[]"); } catch { return []; }
+  });
+
+  useEffect(() => { localStorage.setItem("yan_favs", JSON.stringify(skus)); }, [skus]);
+
+  const has = (sku) => skus.includes(sku);
+  const toggle = (sku) => {
+    setSkus(prev => prev.includes(sku) ? prev.filter(x => x !== sku) : [...prev, sku]);
+  };
+
+  // 可选：若后端提供 /favorites（GET/POST/DELETE），在此处做一次轻量同步（失败就忽略）
+  // 例如：
+  // useEffect(() => {
+  //   const t = localStorage.getItem("yan_token");
+  //   if (!t) return;
+  //   (async () => {
+  //     try {
+  //       const remote = await api("/favorites", { auth: true });
+  //       if (Array.isArray(remote)) setSkus(remote);   // 以服务端为准
+  //     } catch {}
+  //   })();
+  // }, []);
+
+  return <FavCtx.Provider value={{ skus, has, toggle }}>{children}</FavCtx.Provider>;
+}
+function useFav() {
+  const ctx = useContext(FavCtx);
+  // 没有 Provider 时给个无害的兜底，避免渲染期直接崩溃成白屏
+  return ctx ?? { skus: [], has: () => false, toggle: () => {} };
+}
+
 
 /* ================= Toast ================= */
 const ToastCtx = createContext(null);
@@ -60,7 +94,7 @@ function ToastProvider({ children }) {
   const add = (msg) => {
     const id = Math.random().toString(36).slice(2);
     setItems((prev) => [...prev, { id, msg }]);
-    setTimeout(() => setItems((prev) => prev.filter((x) => x.id !== id)), 2200);
+    setTimeout(() => setItems((prev) => prev.filter((x) => x.id !== id)), 2000);
   };
   return (
     <ToastCtx.Provider value={{ add }}>
@@ -77,7 +111,7 @@ function ToastProvider({ children }) {
 }
 function useToast() { return useContext(ToastCtx); }
 
-/* ================= Cart ================= */
+/* ================= Cart (local) ================= */
 const CartCtx = createContext(null);
 function CartProvider({ children }) {
   const [items, setItems] = useState(() => {
@@ -98,16 +132,27 @@ function CartProvider({ children }) {
         name: p.name,
         price: Number(p.unitPrice ?? p.price ?? 0),
         quantity: qty,
-        imageUrl: p.imageUrl
+        imageUrl: p.imageUrl,
+        roomType: p.roomType,
+        keywords: p.keywords
       }];
     });
     toast?.add("Added to cart");
   };
+
+  const updateQty = (sku, qty) => {
+    qty = Math.max(1, Number(qty) || 1);
+    setItems(prev => prev.map(it => it.sku === sku ? { ...it, quantity: qty } : it));
+  };
+
+  const inc = (sku) => setItems(prev => prev.map(it => it.sku === sku ? { ...it, quantity: (it.quantity || 0) + 1 } : it));
+  const dec = (sku) => setItems(prev => prev.map(it => it.sku === sku ? { ...it, quantity: Math.max(1, (it.quantity || 0) - 1) } : it));
   const remove = (sku) => setItems(prev => prev.filter(i => i.sku !== sku));
   const clear = () => setItems([]);
   const total = items.reduce((s, i) => s + (Number(i.price) || 0) * (i.quantity || 0), 0);
   const count = items.reduce((s, i) => s + (i.quantity || 0), 0);
-  return <CartCtx.Provider value={{ items, add, remove, clear, total, count }}>{children}</CartCtx.Provider>;
+
+  return <CartCtx.Provider value={{ items, add, updateQty, inc, dec, remove, clear, total, count }}>{children}</CartCtx.Provider>;
 }
 function useCart() { return useContext(CartCtx); }
 
@@ -124,7 +169,8 @@ function AuthModal({ open, onClose, mode = "login", onAuthed }) {
       setLoading(true); setErr("");
       if (mode === "register") {
         await api("/account/create", {
-          method: "POST", body: {
+          method: "POST",
+          body: {
             email, userName: name, password,
             shippingAddress: {}, billingAddress: {},
             defaultPaymentMethod: { type: "CARD", maskedDetail: "VISA **** 0000" }
@@ -134,9 +180,7 @@ function AuthModal({ open, onClose, mode = "login", onAuthed }) {
       const r = await api("/auth/login", { method: "POST", body: { email, password } });
       onAuthed(r.token, email);
       onClose();
-    } catch (e) {
-      setErr(e.message);
-    } finally { setLoading(false); }
+    } catch (e) { setErr(e.message); } finally { setLoading(false); }
   };
 
   if (!open) return null;
@@ -144,9 +188,7 @@ function AuthModal({ open, onClose, mode = "login", onAuthed }) {
     <div style={S.modalBackdrop}>
       <div style={S.modalCard}>
         <h3 style={S.h3}>{mode === "login" ? "Sign in" : "Create account"}</h3>
-        {mode === "register" && (
-          <input style={S.input} placeholder="Name" value={name} onChange={e => setName(e.target.value)} />
-        )}
+        {mode === "register" && <input style={S.input} placeholder="Name" value={name} onChange={e => setName(e.target.value)} />}
         <input style={S.input} placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
         <input style={S.input} placeholder="Password" type="password" value={password} onChange={e => setPassword(e.target.value)} />
         {err && <div style={S.error}>{err}</div>}
@@ -159,15 +201,28 @@ function AuthModal({ open, onClose, mode = "login", onAuthed }) {
   );
 }
 
-/* ================= Cards ================= */
+/* ================= Product Card ================= */
+function Heart({ active, onClick }) {
+  return (
+    <button onClick={onClick}
+      title={active ? "Unfavorite" : "Favorite"}
+      style={{ position:"absolute", top:10, right:10, width:36, height:36, borderRadius:999,
+        border:"1px solid #eee", background:"white", display:"grid", placeItems:"center",
+        boxShadow:"0 6px 16px rgba(0,0,0,.12)", cursor:"pointer" }}>
+      <span style={{fontSize:18, color: active ? THEME.ACCENT : "#cbd5e1"}}>♥</span>
+    </button>
+  );
+}
+
 function ProductCard({ p }) {
   const nav = useNavigate();
   const { add } = useCart();
+  const fav = useFav();
 
   const goDetail = () => nav(`/item/${encodeURIComponent(p.sku)}`);
 
   return (
-    <div style={S.card}>
+    <div style={{ ...S.card, position:"relative" }}>
       <div style={S.thumb} onClick={goDetail}>
         <img
           src={getImageSrc(p)}
@@ -176,6 +231,10 @@ function ProductCard({ p }) {
           onError={(e) => { e.currentTarget.src = "https://via.placeholder.com/400x240?text=YanCarpet"; }}
         />
       </div>
+
+      {/* 右上角收藏 */}
+      <Heart active={fav.has(p.sku)} onClick={() => fav.toggle(p.sku)} />
+
       <div style={{ padding: 12 }}>
         <div style={S.title}>{p.name}</div>
         <div style={S.muted}>{[p.material, p.color].filter(Boolean).join(" · ")}</div>
@@ -192,33 +251,73 @@ function ProductCard({ p }) {
   );
 }
 
+
+/* ================= Recommendations ================= */
+function normalizeList(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  return [String(v)];
+}
+function scoreForSeeds(item, seeds) {
+  const kws = new Set(normalizeList(item.keywords).map(x => String(x).toLowerCase()));
+  const rooms = new Set(normalizeList(item.roomType).map(x => String(x).toLowerCase()));
+  let score = 0;
+  for (const s of seeds.keywords) if (kws.has(s)) score += 2;
+  for (const s of seeds.rooms) if (rooms.has(s)) score += 1;
+  return score;
+}
+function Recommendations({ seeds, excludeSkus = [], limit = 8, title = "You may also like" }) {
+  const [list, setList] = useState([]);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const data = await api("/items");
+      const arr = Array.isArray(data) ? data
+        : Array.isArray(data?.items) ? data.items
+        : Array.isArray(data?.content) ? data.content : [];
+      if (!alive) return;
+      const ex = new Set(excludeSkus);
+      const ranked = arr
+        .filter(it => it?.sku && !ex.has(it.sku))
+        .map(it => ({ it, score: scoreForSeeds(it, seeds) }))
+        .filter(x => x.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit)
+        .map(x => x.it);
+      setList(ranked);
+    })().catch(() => {});
+    return () => { alive = false; };
+  }, [JSON.stringify(seeds), JSON.stringify(excludeSkus), limit]);
+
+  if (list.length === 0) return null;
+  return (
+    <div style={{ marginTop: 24 }}>
+      <div style={{ ...S.h3, marginBottom: 8 }}>{title}</div>
+      <div style={S.grid}>
+        {list.map(p => <ProductCard key={p.sku} p={p} />)}
+      </div>
+    </div>
+  );
+}
+
 /* ================= Pages ================= */
-// 首页轮播
 function Carousel({ slides = [], interval = 3500 }) {
   const [i, setI] = useState(0);
   const nav = useNavigate();
   const len = Array.isArray(slides) ? slides.length : 0;
-
   useEffect(() => {
     if (len <= 1) return;
     const t = setInterval(() => setI(v => (v + 1) % len), interval);
     return () => clearInterval(t);
   }, [len, interval]);
-
   if (len === 0) {
     return (
-      <div style={{
-        position: "relative", height: THEME.HERO_HEIGHT,
-        background: "#F6EFE9", borderRadius: 12,
-        display: "grid", placeItems: "center", border: "1px solid #e5e7eb"
-      }}>
+      <div style={{ position: "relative", height: THEME.HERO_HEIGHT, background: "#F6EFE9", borderRadius: 12, display: "grid", placeItems: "center", border: "1px solid #e5e7eb" }}>
         <div style={{ color: "#64748b" }}>No products yet.</div>
       </div>
     );
   }
-
   const cur = slides[Math.min(i, len - 1)] || slides[0];
-
   return (
     <div style={{ position: "relative", height: THEME.HERO_HEIGHT, borderRadius: 12, overflow: "hidden", background: "#fff" }}>
       <img
@@ -243,52 +342,27 @@ function Carousel({ slides = [], interval = 3500 }) {
 function HomePage() {
   const [slides, setSlides] = useState([]);
   const [err, setErr] = useState("");
-
   useEffect(() => {
     let keep = true;
     (async () => {
       try {
         setErr("");
-        // 若 /items/search?q= 更合适，可改成那条
         const data = await api(`/items`);
         if (!keep) return;
         const arr = Array.isArray(data) ? data
           : Array.isArray(data?.items) ? data.items
-          : Array.isArray(data?.content) ? data.content
-          : [];
+          : Array.isArray(data?.content) ? data.content : [];
         const withImg = arr.filter(x => x?.imageUrl).slice(0, 6);
         setSlides(withImg);
-      } catch (e) {
-        if (keep) setErr(e.message || String(e));
-      }
+      } catch (e) { if (keep) setErr(e.message || String(e)); }
     })();
     return () => { keep = false; };
   }, []);
-
-  // 左右分栏：左轮播（已缩小），右 About Us
   return (
-    <div style={{
-      display: "grid",
-      gridTemplateColumns: "1fr 1fr",
-      gap: 24,
-      alignItems: "start",
-      padding: "16px 0"
-    }}>
-      <div>
-        <Carousel slides={slides} />
-      </div>
-
-      <div style={{
-      background:"#fff", 
-      border:"1px solid #e5e7eb", 
-      borderRadius:12, 
-      padding:16, 
-      minHeight: THEME.HERO_HEIGHT, 
-      overflow: "visible"           
-    }}>
-        <h2 style={{ fontSize: 20, fontWeight: 800, color: "#A65B2F", marginBottom: 8 }}>
-          ABOUT US
-        </h2>
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, alignItems: "start", padding: "16px 0" }}>
+      <div><Carousel slides={slides} /></div>
+      <div style={{ background:"#fff", border:"1px solid #e5e7eb", borderRadius:12, padding:16, minHeight: THEME.HERO_HEIGHT }}>
+        <h2 style={{ fontSize: 20, fontWeight: 800, color: "#A65B2F", marginBottom: 8 }}>ABOUT US</h2>
         {err && <div style={{ color: "crimson", marginBottom: 8 }}>Failed to load products: {err}</div>}
         <p style={{ color: "#374151", lineHeight: 1.6 }}>
           Jiangsu Shengyan Carpet Co., Ltd. located in 336 Yanling Road, Jiangyin, Jiangsu Province, China.
@@ -308,15 +382,12 @@ function HomePage() {
   );
 }
 
-// Products（带抽屉筛选）
 function ProductsPage() {
   const [list, setList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   const [q, setQ] = useState("");
   const debQ = useDebounced(q, 300);
-
   const [open, setOpen] = useState(false);
   const [filters, setFilters] = useState({ color: "", material: "", room: "" });
   const [draft, setDraft] = useState({ color: "", material: "", room: "" });
@@ -331,33 +402,23 @@ function ProductsPage() {
         if (!keep) return;
         const arr = Array.isArray(data) ? data
           : Array.isArray(data?.items) ? data.items
-          : Array.isArray(data?.content) ? data.content
-          : [];
+          : Array.isArray(data?.content) ? data.content : [];
         setList(arr);
-      } catch (e) {
-        if (keep) setError(e.message || String(e));
-      } finally {
-        if (keep) setLoading(false);
-      }
+      } catch (e) { if (keep) setError(e.message || String(e)); }
+      finally { if (keep) setLoading(false); }
     })();
     return () => { keep = false; };
   }, [debQ]);
 
   const optionSets = useMemo(() => {
-    const colors = new Set();
-    const materials = new Set();
-    const rooms = new Set();
+    const colors = new Set(), materials = new Set(), rooms = new Set();
     for (const it of list) {
       if (it?.color) String(it.color).split(/[,/]/).map(s => s.trim()).forEach(v => v && colors.add(v));
       if (it?.material) String(it.material).split(/[,/]/).map(s => s.trim()).forEach(v => v && materials.add(v));
       const rt = Array.isArray(it?.roomType) ? it.roomType : (it?.roomType ? [it.roomType] : []);
       rt.forEach(v => v && rooms.add(v));
     }
-    return {
-      colors: Array.from(colors).sort(),
-      materials: Array.from(materials).sort(),
-      rooms: Array.from(rooms).sort(),
-    };
+    return { colors: [...colors].sort(), materials: [...materials].sort(), rooms: [...rooms].sort() };
   }, [list]);
 
   const filtered = useMemo(() => {
@@ -370,22 +431,12 @@ function ProductsPage() {
     });
   }, [list, filters]);
 
-  const openDrawer = () => { setDraft(filters); setOpen(true); };
-  const applyDraft = () => { setFilters(draft); setOpen(false); };
-  const clearDraft = () => { setDraft({ color: "", material: "", room: "" }); };
-
   return (
     <div style={S.page}>
       <div style={{ ...S.hero, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
-        <input
-          style={{ ...S.input, maxWidth: 480 }}
-          placeholder="Search: wool carpet / tiles / rug / sku"
-          value={q}
-          onChange={e => setQ(e.target.value)}
-        />
-        <button style={S.ghostBtn} onClick={openDrawer}>Filters ▾</button>
+        <input style={{ ...S.input, maxWidth: 480 }} placeholder="Search: wool carpet / tiles / rug / sku" value={q} onChange={e => setQ(e.target.value)} />
+        <button style={S.ghostBtn} onClick={() => { setDraft(filters); setOpen(true); }}>Filters ▾</button>
       </div>
-
       {error && <div style={S.error}>{error}</div>}
       {loading && <div>Loading...</div>}
 
@@ -398,9 +449,7 @@ function ProductsPage() {
         </div>
       )}
 
-      <div style={S.grid}>
-        {filtered.map(p => <ProductCard key={p.sku} p={p} />)}
-      </div>
+      <div style={S.grid}>{filtered.map(p => <ProductCard key={p.sku} p={p} />)}</div>
       {!loading && filtered.length === 0 && <div style={{ marginTop: 16 }}>No results.</div>}
 
       {open && (
@@ -413,11 +462,7 @@ function ProductsPage() {
 
             <div style={{ marginTop: 8 }}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Color</div>
-              <select
-                style={{ ...S.input, padding: "8px 10px" }}
-                value={draft.color}
-                onChange={e => setDraft(d => ({ ...d, color: e.target.value }))}
-              >
+              <select style={{ ...S.input, padding: "8px 10px" }} value={draft.color} onChange={e => setDraft(d => ({ ...d, color: e.target.value }))}>
                 <option value="">All</option>
                 {optionSets.colors.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
@@ -425,11 +470,7 @@ function ProductsPage() {
 
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Material</div>
-              <select
-                style={{ ...S.input, padding: "8px 10px" }}
-                value={draft.material}
-                onChange={e => setDraft(d => ({ ...d, material: e.target.value }))}
-              >
+              <select style={{ ...S.input, padding: "8px 10px" }} value={draft.material} onChange={e => setDraft(d => ({ ...d, material: e.target.value }))}>
                 <option value="">All</option>
                 {optionSets.materials.map(m => <option key={m} value={m}>{m}</option>)}
               </select>
@@ -437,19 +478,15 @@ function ProductsPage() {
 
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 700, marginBottom: 6 }}>Room type</div>
-              <select
-                style={{ ...S.input, padding: "8px 10px" }}
-                value={draft.room}
-                onChange={e => setDraft(d => ({ ...d, room: e.target.value }))}
-              >
+              <select style={{ ...S.input, padding: "8px 10px" }} value={draft.room} onChange={e => setDraft(d => ({ ...d, room: e.target.value }))}>
                 <option value="">All</option>
                 {optionSets.rooms.map(r => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
 
             <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-              <button style={S.ghostBtn} onClick={clearDraft}>Clear</button>
-              <button style={S.primaryBtn} onClick={applyDraft}>Apply</button>
+              <button style={S.ghostBtn} onClick={() => setDraft({ color: "", material: "", room: "" })}>Clear</button>
+              <button style={S.primaryBtn} onClick={() => { setFilters(draft); setOpen(false); }}>Apply</button>
             </div>
           </div>
         </div>
@@ -460,14 +497,25 @@ function ProductsPage() {
 
 function Chip({ children, onClear }) {
   return (
-    <div style={{
-      display: "inline-flex", alignItems: "center", gap: 6,
-      padding: "6px 10px", border: "1px solid #e5e7eb", borderRadius: 999, background: "#fff"
-    }}>
+    <div style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", border: "1px solid #e5e7eb", borderRadius: 999, background: "#fff" }}>
       <span>{children}</span>
       <button onClick={onClear} style={{ border: "none", background: "none", cursor: "pointer" }}>✕</button>
     </div>
   );
+}
+
+// 若 Recommendations 未引入，避免 ReferenceError 直接白屏
+const SafeRecommendations = (props) =>
+  (typeof Recommendations !== "undefined" ? <Recommendations {...props} /> : null);
+
+// 若 FavoritesProvider 未包裹或 useFav 未导出，降级为 no-op，避免 “useFav is not a function”
+function useSafeFav() {
+  try {
+    // 如果项目里真的有 useFav，就用它
+    if (typeof useFav === "function") return useFav();
+  } catch (_) {}
+  // 否则提供空实现（不影响其它功能）
+  return { has: () => false, toggle: () => {} };
 }
 
 function DetailPage() {
@@ -475,8 +523,9 @@ function DetailPage() {
   const [p, setP] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [showDelivery, setShowDelivery] = useState(false);  
+  const [showDelivery, setShowDelivery] = useState(false);
   const { add } = useCart();
+  const fav = useSafeFav();
 
   useEffect(() => {
     let keep = true;
@@ -485,7 +534,7 @@ function DetailPage() {
         setLoading(true); setError("");
         const data = await api(`/items/${encodeURIComponent(sku)}`);
         if (!keep) return; setP(data);
-      } catch (e) { if (keep) setError(e.message); } finally { if (keep) setLoading(false); }
+      } catch (e) { if (keep) setError(e.message || String(e)); } finally { if (keep) setLoading(false); }
     })();
     return () => { keep = false; };
   }, [sku]);
@@ -494,29 +543,49 @@ function DetailPage() {
   if (error) return <div style={S.page}><div style={S.error}>{error}</div></div>;
   if (!p) return <div style={S.page}>Not found.</div>;
 
+  const seeds = {
+    keywords: normalizeList(p.keywords).map(x => String(x).toLowerCase()),
+    rooms: normalizeList(p.roomType).map(x => String(x).toLowerCase())
+  };
+
   return (
     <div style={S.page}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        <img
-          src={getImageSrc(p)}
-          alt={p.name}
-          style={{ width: "100%", borderRadius: 16 }}
-        />
+        {/* 左：大图 + 收藏按钮 */}
+        <div style={{ position: "relative" }}>
+          <img
+            src={getImageSrc(p)}
+            alt={p.name}
+            style={{ width: "100%", borderRadius: 16 }}
+            onError={(e) => { e.currentTarget.src = "https://via.placeholder.com/800x480?text=YanCarpet"; }}
+          />
+          <div style={{ position: "absolute", top: 10, right: 10 }}>
+            <Heart active={fav.has(p.sku)} onClick={() => fav.toggle(p.sku)} />
+          </div>
+        </div>
+
+        {/* 右：详情 */}
         <div>
           <div style={S.h2}>{p.name}</div>
           <div style={{ margin: "8px 0" }}>{p.description}</div>
           <div style={S.muted}>Material: {p.material} · Color: {p.color}</div>
-          <div style={{ marginTop: 8 }}>Room: {(Array.isArray(p.roomType) ? p.roomType.join(", ") : p.roomType) || "-"}</div>
-          <div style={{ marginTop: 8 }}>Sizes: {(p.sizeOptions || []).join(", ")}</div>
+          <div style={{ marginTop: 8 }}>
+            Room: {(Array.isArray(p.roomType) ? p.roomType.join(", ") : p.roomType) || "-"}
+          </div>
+          <div style={{ marginTop: 8 }}>
+            Sizes: {(p.sizeOptions || []).join(", ")}
+          </div>
           <div style={{ marginTop: 12, fontSize: 18, fontWeight: 700 }}>
             ${Number(p.unitPrice ?? p.price ?? 0).toFixed(2)} <span style={S.muted}>/ {p.unit || "usd/sqm"}</span>
           </div>
           <div style={{ display:"flex", gap:8, marginTop:12 }}>
             <button style={S.primaryBtn} onClick={()=>add(p,1)}>Add to cart</button>
-            <button style={S.ghostBtn} onClick={()=>setShowDelivery(true)}>Delivery details</button> {}
+            <button style={S.ghostBtn} onClick={()=>setShowDelivery(true)}>Delivery details</button>
           </div>
         </div>
       </div>
+
+      {/* Delivery 抽屉 */}
       {showDelivery && (
         <div style={S.panelMask} onClick={()=>setShowDelivery(false)}>
           <div style={S.panel} onClick={e=>e.stopPropagation()}>
@@ -524,23 +593,42 @@ function DetailPage() {
               <div style={{ fontWeight:800, fontSize:18 }}>Delivery details</div>
               <button style={S.linkBtn} onClick={()=>setShowDelivery(false)}>Close ✕</button>
             </div>
-
             <div style={{ marginTop:12, color:"#374151", lineHeight:1.7 }}>
               <p><b>Shipping policy</b></p>
               <p>Sea shipping ≈ <b>15 business days</b>; Custom ≈ <b>30 business days</b>.</p>
-              <p>We ship worldwide. Packaging is reinforced to protect pile and edges. Tracking will be provided after dispatch.</p>
-              <p>For bespoke sizes/colors, please contact our sales for production lead time and bulk shipping options.</p>
+              <p>We ship worldwide. Packaging is reinforced. Tracking will be provided after dispatch.</p>
+              <p>For bespoke sizes/colors, contact sales for production lead time.</p>
             </div>
           </div>
         </div>
       )}
+
+      {/* 推荐：组件存在就渲染，不存在就跳过，避免白屏 */}
+      <SafeRecommendations
+        seeds={seeds}
+        excludeSkus={[p.sku]}
+        title="You may also like"
+      />
     </div>
   );
 }
 
+
 function CartPage() {
-  const { items, remove, clear, total } = useCart();
+  const { items, remove, clear, total, inc, dec, updateQty } = useCart();
   const nav = useNavigate();
+
+  // 推荐：基于购物车里的 roomType / keywords 聚合
+  const seeds = useMemo(() => {
+    const rooms = new Set();
+    const kw = new Set();
+    for (const it of items) {
+      normalizeList(it.roomType).forEach(r => rooms.add(String(r).toLowerCase()));
+      normalizeList(it.keywords).forEach(k => kw.add(String(k).toLowerCase()));
+    }
+    return { rooms: [...rooms], keywords: [...kw] };
+  }, [items]);
+
   return (
     <div style={S.page}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -556,7 +644,9 @@ function CartPage() {
       ) : (
         <>
           <table style={S.table}>
-            <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th></th></tr></thead>
+            <thead>
+              <tr><th style={{textAlign:"left"}}>Item</th><th>Qty</th><th>Price</th><th></th></tr>
+            </thead>
             <tbody>
               {items.map(it => (
                 <tr key={it.sku}>
@@ -568,9 +658,21 @@ function CartPage() {
                       style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${S._border}` }} />
                     <div style={{ fontWeight: 700, textDecoration: "underline" }}>{it.name}</div>
                   </td>
-                  <td>{it.quantity}</td>
-                  <td>${(Number(it.price) * (it.quantity || 0)).toFixed(2)}</td>
-                  <td><button style={S.linkBtn} onClick={() => remove(it.sku)}>Remove</button></td>
+                  <td style={{ textAlign: "center" }}>
+                    <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <button style={S.ghostBtn} onClick={(e)=>{e.stopPropagation(); dec(it.sku);}}>-</button>
+                      <input
+                        value={it.quantity}
+                        onClick={(e)=>e.stopPropagation()}
+                        onChange={(e)=>updateQty(it.sku, e.target.value)}
+                        onBlur={(e)=>updateQty(it.sku, e.target.value)}
+                        style={{ width: 56, textAlign: "center", ...S.input, padding: 6 }}
+                      />
+                      <button style={S.ghostBtn} onClick={(e)=>{e.stopPropagation(); inc(it.sku);}}>+</button>
+                    </div>
+                  </td>
+                  <td style={{ textAlign: "right" }}>${(Number(it.price) * (it.quantity || 0)).toFixed(2)}</td>
+                  <td style={{ textAlign: "right" }}><button style={S.linkBtn} onClick={() => remove(it.sku)}>Remove</button></td>
                 </tr>
               ))}
             </tbody>
@@ -578,6 +680,12 @@ function CartPage() {
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
             <div>Total: <b>${total.toFixed(2)}</b></div>
           </div>
+
+          <Recommendations
+            seeds={seeds}
+            excludeSkus={items.map(i => i.sku)}
+            title="Recommended for your cart"
+          />
         </>
       )}
     </div>
@@ -602,8 +710,7 @@ function CheckoutPage() {
         body: { orderId: order.orderId, paymentMethod: "CARD", amount: Number(total.toFixed(2)) }
       });
       clear();
-      alert("Order placed & paid successfully! OrderId: " + order.orderId);
-      nav(`/orders/${order.orderId}`);
+      nav(`/success/${order.orderId}`);
     } catch (e) { setErr(e.message); } finally { setLoading(false); }
   };
 
@@ -662,6 +769,30 @@ function OrderDetailPage() {
   );
 }
 
+/* ================= Pay Success Page ================= */
+function PaySuccessPage() {
+  const { orderId } = useParams();
+  const nav = useNavigate();
+
+  return (
+    <div style={S.page}>
+      <div style={{ fontSize: 24, fontWeight: 900, color: "#0a7f2e" }}>
+        Payment successful 🎉
+      </div>
+      <div style={{ marginTop: 8 }}>
+        Your order has been placed and paid. Order ID: <b>{orderId}</b>
+      </div>
+
+      {/* 去掉 View order detail 按钮，只保留 Continue shopping */}
+      <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+        <button style={S.primaryBtn} onClick={() => nav("/products")}>
+          Continue shopping
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* ================= Shell / Header ================= */
 function HeaderBar() {
   const nav = useNavigate();
@@ -669,39 +800,42 @@ function HeaderBar() {
   const [authOpen, setAuthOpen] = useState(false);
   const [mode, setMode] = useState("login");
   const email = localStorage.getItem("yan_email");
+  const [menuOpen, setMenuOpen] = useState(false);   // ← 新增状态
 
   const onAuthed = (token, em) => {
     localStorage.setItem("yan_token", token);
     localStorage.setItem("yan_email", em);
   };
 
-  const location = useLocation();
-
   return (
     <>
       <header style={S.header}>
-        <Link to="/" style={S.brand}>
-          YanCarpet
-        </Link>
+        {/* 左上角汉堡 */}
+        <button
+          aria-label="menu"
+          onClick={() => setMenuOpen(true)}
+          style={{ ...S.ghostBtn, padding: "8px 12px" }}
+          title="Menu"
+        >
+          ☰
+        </button>
+
+        <Link to="/" style={S.brand}>YanCarpet</Link>
+
         <nav style={{ display: "flex", gap: 16, alignItems: "center" }}>
           <Link to="/" className="nav" style={S.navLink}>Home</Link>
           <Link to="/products" className="nav" style={S.navLink}>Products</Link>
           <Link to="/about" className="nav" style={S.navLink}>About us</Link>
           <Link to="/contact" className="nav" style={S.navLink}>Contact us</Link>
         </nav>
+
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ color: "#A65B2F", fontWeight: 800 }}>Everything Ships FREE</div>
 
           {!email ? (
             <>
-              <button
-                style={S.ghostBtn}
-                onClick={() => { setMode("login"); setAuthOpen(true); }}
-              >Sign in</button>
-              <button
-                style={S.primaryBtn}
-                onClick={() => { setMode("register"); setAuthOpen(true); }}
-              >Register</button>
+              <button style={S.ghostBtn} onClick={() => { setMode("login"); setAuthOpen(true); }}>Sign in</button>
+              <button style={S.primaryBtn} onClick={() => { setMode("register"); setAuthOpen(true); }}>Register</button>
             </>
           ) : (
             <>
@@ -730,29 +864,60 @@ function HeaderBar() {
         </div>
       </header>
 
-      {/* Auth Modal 对所有路由有效 */}
+      {/* 侧边抽屉 */}
+      {menuOpen && (
+        <div style={S.panelMask} onClick={() => setMenuOpen(false)}>
+          <div style={S.panel} onClick={e => e.stopPropagation()}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div style={{ fontWeight:800, fontSize:18 }}>Menu</div>
+              <button style={S.linkBtn} onClick={() => setMenuOpen(false)}>Close ✕</button>
+            </div>
+
+            <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+              <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); nav("/orders"); }}>
+                Order history
+              </button>
+              <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); nav("/favorites"); }}>
+                Favorites
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <AuthModal open={authOpen} onClose={() => setAuthOpen(false)} mode={mode} onAuthed={onAuthed} />
     </>
   );
 }
 
-class ErrorBoundary extends React.Component {
-  constructor(props) { super(props); this.state = { error: null }; }
-  static getDerivedStateFromError(error) { return { error }; }
-  componentDidCatch(error, info) { console.error("[UI ErrorBoundary]", error, info); }
-  render() {
-    if (this.state.error) {
-      return (
-        <div style={{ padding: 24, fontFamily: "monospace" }}>
-          <h3>UI crashed</h3>
-          <pre style={{ whiteSpace: "pre-wrap" }}>{String(this.state.error?.message || this.state.error)}</pre>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
+
+/* ================= Shell / Routes ================= */
+function Shell() {
+  return (
+    <>
+      <HeaderBar />
+      <main style={{ padding: "24px 16px", maxWidth: 1200, margin: "0 auto" }}>
+        <Routes>
+          <Route path="/" element={<HomePage />} />
+          <Route path="/products" element={<ProductsPage />} />
+          <Route path="/item/:sku" element={<DetailPage />} />
+          <Route path="/cart" element={<CartPage />} />
+          <Route path="/checkout" element={<CheckoutPage />} />
+          <Route path="/orders/:orderId" element={<OrderDetailPage />} />
+          <Route path="/success/:orderId" element={<PaySuccessPage />} />
+          <Route path="/about" element={<AboutPage />} />
+          <Route path="/contact" element={<ContactPage />} />
+          <Route path="/orders" element={<OrdersPage />} />
+          <Route path="/favorites" element={<FavoritesPage />} />
+
+        </Routes>
+      </main>
+      <footer style={S.footer}>© {new Date().getFullYear()} YanCarpet</footer>
+    </>
+  );
 }
 
+/* ================= Static Pages ================= */
 function AboutPage() {
   return (
     <div style={S.page}>
@@ -768,7 +933,7 @@ function AboutPage() {
       <p style={{ color: "#374151", lineHeight: 1.6 }}>
         Our factory located in Liyang, our products include Axminster carpet, Wilton carpet, exhibition carpet,
         carpet tiles, tufted carpet and PVC. Our materials cover wool, PP, nylon, sisal, acrylic, polyester, and corn fiber.
-        We have been able to meet designers’, buyers’, and end-users’ requirements in terms of design, quality, durability, quantity, and price.
+        We meet designers’, buyers’, and end-users’ requirements on design, quality, durability and price.
       </p>
     </div>
   );
@@ -791,29 +956,96 @@ Address: No336, Yanling Road, Jiangyin City, Jiangsu Province, China.`}
     </div>
   );
 }
+function FavoritesPage() {
+  const { skus } = useFav();
+  const [items, setItems] = useState([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
 
-function Shell() {
+  useEffect(() => {
+    let keep = true;
+    (async () => {
+      try {
+        setLoading(true); setErr("");
+        // 简单逐个拉取；数量多时可以做批量接口 /items?skus=...
+        const rows = [];
+        for (const sku of skus) {
+          try {
+            const it = await api(`/items/${encodeURIComponent(sku)}`);
+            rows.push(it);
+          } catch {}
+        }
+        if (!keep) return;
+        setItems(rows);
+      } catch (e) {
+        if (keep) setErr(e.message);
+      } finally {
+        if (keep) setLoading(false);
+      }
+    })();
+    return () => { keep = false; };
+  }, [skus]);
+
   return (
-    <>
-      <HeaderBar />
-      <main style={{ padding: "24px 16px", maxWidth: 1200, margin: "0 auto" }}>
-        <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/products" element={<ProductsPage />} />
-          <Route path="/item/:sku" element={<DetailPage />} />
-          <Route path="/cart" element={<CartPage />} />
-          <Route path="/checkout" element={<CheckoutPage />} />
-          <Route path="/orders/:orderId" element={<OrderDetailPage />} />
-          <Route path="/about" element={<AboutPage />} />
-          <Route path="/contact" element={<ContactPage />} />
-        </Routes>
-      </main>
-      <footer style={S.footer}>
-        © {new Date().getFullYear()} YanCarpet
-      </footer>
-    </>
+    <div style={S.page}>
+      <div style={S.h2}>Favorites</div>
+      {err && <div style={S.error}>{err}</div>}
+      {loading && <div>Loading...</div>}
+      {!loading && items.length === 0 && <div>No favorites yet.</div>}
+      <div style={S.grid}>
+        {items.map(p => <ProductCard key={p.sku} p={p} />)}
+      </div>
+    </div>
   );
 }
+
+function OrdersPage() {
+  const [list, setList] = useState([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let keep = true;
+    (async () => {
+      try {
+        setLoading(true); setErr("");
+        const data = await api("/orders", { auth: true }); // 期望后端返回 [{orderId,status,totalAmount,createdAt,items:[...]}]
+        if (!keep) return;
+        setList(Array.isArray(data) ? data : []);
+      } catch (e) {
+        if (keep) setErr(e.message);
+      } finally {
+        if (keep) setLoading(false);
+      }
+    })();
+    return () => { keep = false; };
+  }, []);
+
+  return (
+    <div style={S.page}>
+      <div style={S.h2}>Order history</div>
+      {err && <div style={S.error}>{err}</div>}
+      {loading && <div>Loading...</div>}
+      {!loading && list.length === 0 && <div>No orders yet.</div>}
+      <div style={{ display: "grid", gap: 12 }}>
+        {list.map(o => (
+          <div key={o.orderId} style={{ background:"#fff", border:`1px solid ${S._border}`, borderRadius:12, padding:12 }}>
+            <div style={{ fontWeight:800 }}>Order {o.orderId}</div>
+            <div style={S.muted}>Status: {o.status} · Total: ${Number(o.totalAmount||0).toFixed(2)} · {o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}</div>
+            <div style={{ marginTop: 8 }}>
+              {(o.items||[]).map((it, idx) => (
+                <div key={idx} style={{ padding:"4px 0", borderBottom:"1px dashed #eee" }}>
+                  {it.name || it.sku} × {it.quantity} — ${Number(it.price||0).toFixed(2)}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 
 /* ================= Styles ================= */
 const S = {
@@ -827,29 +1059,15 @@ const S = {
     fontWeight: 900, fontSize: 22, textDecoration: "none", color: "black",
     fontFamily: "'Georgia', 'Times New Roman', serif", letterSpacing: ".5px"
   },
-  navLink: {
-    color:"#111"
-  },
+  navLink: { color:"#111" },
   page: { maxWidth: 1200, margin: "0 auto", padding: "16px" },
   hero: { padding: "12px 16px", background: "#f6efe9", borderRadius: 12, marginBottom: 12 },
-  toolbar: { display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 8, marginBottom: 12 },
-  grid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
-    gap: 20,
-    justifyItems: "center"
-  },
+  grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 20, justifyItems: "center" },
   card: { background: "white", border: "1px solid #e0d7cb", borderRadius: 12, overflow: "hidden", width: "100%" },
   thumb: { width: "100%", height: 180, background: "#f8fafc", cursor: "pointer" },
   title: { fontWeight: 700, fontSize: 16 },
   price: { marginTop: 6, fontWeight: 700 },
-  input: {
-    padding: "10px 12px",
-    border: "1px solid #ddd",
-    borderRadius: 10,
-    width: "100%",
-    boxSizing: "border-box"
-  },
+  input: { padding: "10px 12px", border: "1px solid #ddd", borderRadius: 10, width: "100%" },
   primaryBtn: { padding: "10px 14px", borderRadius: 10, background: "black", color: "white", border: "none", cursor: "pointer" },
   ghostBtn: { padding: "10px 14px", borderRadius: 10, background: "white", color: "#111", border: "1px solid #ddd", cursor: "pointer" },
   linkBtn: { padding: 0, border: "none", background: "none", color: "#2563eb", cursor: "pointer" },
@@ -866,21 +1084,21 @@ const S = {
 };
 
 /* ================= Mount ================= */
-function App() {
-  return (
-    <BrowserRouter>
-      <GlobalStyle />   
-      <ToastProvider>
-        <CartProvider>
-          <ErrorBoundary>
-            <Shell />
-          </ErrorBoundary>
-        </CartProvider>
-      </ToastProvider>
-    </BrowserRouter>
-  );
-}
+ function App() {
+   return (
+     <BrowserRouter>
+       <GlobalStyle />
+       <ToastProvider>
 
+        <FavoritesProvider>
+          <CartProvider>
+            <Shell />
+          </CartProvider>
+        </FavoritesProvider>
+       </ToastProvider>
+     </BrowserRouter>
+   );
+ }
 
 const container = document.getElementById("root");
 createRoot(container).render(<App />);
