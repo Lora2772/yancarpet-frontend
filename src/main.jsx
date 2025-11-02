@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState, useContext, createContext } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Routes, Route, Link, useNavigate, useParams, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Link, useNavigate, useParams } from "react-router-dom";
 
 /* ================= Theme & Global ================= */
 const THEME = { BG: "#EAE2D6", ACCENT: "#A65B2F", HERO_HEIGHT: 440 };
@@ -15,7 +15,10 @@ const GlobalStyle = () => (
 );
 
 /* ================= Config ================= */
-const API_BASE = (window.__API_BASE__ ?? "http://localhost:8080").replace(/\/$/, "");
+export const API_BASE =
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE) ||
+  (typeof process !== "undefined" && process.env?.VITE_API_BASE) ||
+  "http://localhost:8080";
 
 /* ================= Helpers ================= */
 function getImageSrc(p) {
@@ -25,7 +28,16 @@ function getImageSrc(p) {
     : "https://via.placeholder.com/800x480?text=YanCarpet";
 }
 
-async function api(path, { method = "GET", body, auth = false } = {}) {
+/* ================= Unified API ================= */
+/**
+ * 统一调用后端 API
+ * @param {string} path - 以 / 开头的路径，如 /favorites
+ * @param {object}  opts
+ * @param {string}  opts.method - GET/POST/PUT/DELETE
+ * @param {object}  opts.body   - 将被 JSON.stringify
+ * @param {boolean} opts.auth   - 需要携带 Bearer token
+ */
+export async function api(path, { method = "GET", body, auth = false } = {}) {
   const headers = { "Content-Type": "application/json" };
   const token = localStorage.getItem("yan_token");
 
@@ -35,57 +47,36 @@ async function api(path, { method = "GET", body, auth = false } = {}) {
   }
 
   const url = `${API_BASE}${path}`;
-  const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body != null ? JSON.stringify(body) : undefined,
+  });
+
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status}: ${txt || res.statusText}`);
+    let message = res.statusText;
+    try {
+      const text = await res.text();
+      message = text || message;
+    } catch (_) {}
+    throw new Error(`HTTP ${res.status}: ${message}`);
   }
+
   const ct = res.headers.get("content-type") || "";
   return ct.includes("application/json") ? res.json() : res.text();
 }
+
+// 便捷方法（可选）
+api.get = (path, opts = {}) => api(path, { ...opts, method: "GET" });
+api.post = (path, body, opts = {}) => api(path, { ...opts, method: "POST", body });
+api.put = (path, body, opts = {}) => api(path, { ...opts, method: "PUT", body });
+api.del = (path, opts = {}) => api(path, { ...opts, method: "DELETE" });
 
 function useDebounced(value, delay = 300) {
   const [v, setV] = useState(value);
   useEffect(() => { const t = setTimeout(() => setV(value), delay); return () => clearTimeout(t); }, [value, delay]);
   return v;
 }
-
-/* ================= Favorites ================= */
-const FavCtx = createContext(null);
-
-function FavoritesProvider({ children }) {
-  const [skus, setSkus] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("yan_favs") || "[]"); } catch { return []; }
-  });
-
-  useEffect(() => { localStorage.setItem("yan_favs", JSON.stringify(skus)); }, [skus]);
-
-  const has = (sku) => skus.includes(sku);
-  const toggle = (sku) => {
-    setSkus(prev => prev.includes(sku) ? prev.filter(x => x !== sku) : [...prev, sku]);
-  };
-
-  // 可选：若后端提供 /favorites（GET/POST/DELETE），在此处做一次轻量同步（失败就忽略）
-  // 例如：
-  // useEffect(() => {
-  //   const t = localStorage.getItem("yan_token");
-  //   if (!t) return;
-  //   (async () => {
-  //     try {
-  //       const remote = await api("/favorites", { auth: true });
-  //       if (Array.isArray(remote)) setSkus(remote);   // 以服务端为准
-  //     } catch {}
-  //   })();
-  // }, []);
-
-  return <FavCtx.Provider value={{ skus, has, toggle }}>{children}</FavCtx.Provider>;
-}
-function useFav() {
-  const ctx = useContext(FavCtx);
-  // 没有 Provider 时给个无害的兜底，避免渲染期直接崩溃成白屏
-  return ctx ?? { skus: [], has: () => false, toggle: () => {} };
-}
-
 
 /* ================= Toast ================= */
 const ToastCtx = createContext(null);
@@ -110,6 +101,93 @@ function ToastProvider({ children }) {
   );
 }
 function useToast() { return useContext(ToastCtx); }
+
+/* ================= Favorites ================= */
+const FavoritesContext = createContext(null);
+
+export function FavoritesProvider({ children }) {
+  const [list, setList] = useState([]); // [{ sku, createdAtTs }, ...]
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const token = typeof window !== "undefined" ? localStorage.getItem("yan_token") : null;
+
+  useEffect(() => {
+    if (!token) { setList([]); return; }
+    refresh().catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+
+  async function refresh() {
+    try {
+      setLoading(true);
+      setError("");
+      const data = await api("/favorites", { auth: true });
+      setList(Array.isArray(data) ? data : []);
+    } catch (e) {
+      setError(e.message || String(e));
+      if (/HTTP 401/.test(String(e))) setList([]);
+      console.warn("[favorites] refresh failed:", e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function has(sku) {
+    return list.some((f) => f.sku === sku);
+  }
+
+  async function add(sku) {
+    const token = localStorage.getItem("yan_token");
+    if (!token) throw new Error("Please sign in to favorite items.");
+    await api.post(`/favorites/${encodeURIComponent(sku)}`, null, { auth: true });
+    setList((prev) => (has(sku) ? prev : [{ sku, createdAtTs: Date.now() }, ...prev]));
+    return true;
+  }
+
+  async function remove(sku) {
+    const token = localStorage.getItem("yan_token");
+    if (!token) throw new Error("Please sign in to unfavorite items.");
+    await api.del(`/favorites/${encodeURIComponent(sku)}`, { auth: true });
+    setList((prev) => prev.filter((x) => x.sku !== sku));
+    return false;
+  }
+
+  async function toggle(sku) {
+    const token = localStorage.getItem("yan_token");
+    if (!token) throw new Error("Please sign in to favorite items.");
+    // 如果后端有 /toggle 返回 boolean，就用它；没有就手动切换：
+    try {
+      const now = await api.post(`/favorites/${encodeURIComponent(sku)}/toggle`, null, { auth: true });
+      if (now === true) {
+        setList((prev) => (has(sku) ? prev : [{ sku, createdAtTs: Date.now() }, ...prev]));
+        return true;
+      } else if (now === false) {
+        setList((prev) => prev.filter((x) => x.sku !== sku));
+        return false;
+      }
+      // 回退：手动切换
+      if (has(sku)) return remove(sku);
+      return add(sku);
+    } catch {
+      if (has(sku)) return remove(sku);
+      return add(sku);
+    }
+  }
+
+  const value = useMemo(
+    () => ({ list, loading, error, refresh, has, add, remove, toggle }),
+    [list, loading, error]
+  );
+
+  return <FavoritesContext.Provider value={value}>{children}</FavoritesContext.Provider>;
+}
+
+export function useFav() {
+  const ctx = useContext(FavoritesContext);
+  if (!ctx) throw new Error("useFav must be used within <FavoritesProvider>");
+  return ctx;
+}
 
 /* ================= Cart (local) ================= */
 const CartCtx = createContext(null);
@@ -201,15 +279,46 @@ function AuthModal({ open, onClose, mode = "login", onAuthed }) {
   );
 }
 
-/* ================= Product Card ================= */
-function Heart({ active, onClick }) {
+/* ================= Product Card & Heart ================= */
+// 有鉴权与切换逻辑的小心心（未登录给个提示）
+function Heart({ sku }) {
+  const { has, toggle } = useFav();
+  const active = has(sku);
+
+  async function onClick() {
+    try {
+      const token = localStorage.getItem("yan_token");
+      if (!token) {
+        alert("Please sign in (top-right) to use Favorites.");
+        return;
+      }
+      await toggle(sku);
+    } catch (e) {
+      console.warn(e);
+      alert(e.message || "Favorite failed.");
+    }
+  }
+
   return (
-    <button onClick={onClick}
+    <button
+      onClick={onClick}
       title={active ? "Unfavorite" : "Favorite"}
-      style={{ position:"absolute", top:10, right:10, width:36, height:36, borderRadius:999,
-        border:"1px solid #eee", background:"white", display:"grid", placeItems:"center",
-        boxShadow:"0 6px 16px rgba(0,0,0,.12)", cursor:"pointer" }}>
-      <span style={{fontSize:18, color: active ? THEME.ACCENT : "#cbd5e1"}}>♥</span>
+      style={{
+        position: "absolute",
+        top: 10,
+        right: 10,
+        width: 36,
+        height: 36,
+        borderRadius: 999,
+        border: "1px solid #eee",
+        background: "white",
+        display: "grid",
+        placeItems: "center",
+        boxShadow: "0 6px 16px rgba(0,0,0,.12)",
+        cursor: "pointer",
+      }}
+    >
+      <span style={{ fontSize: 18, color: active ? "#0ea5e9" : "#cbd5e1" }}>♥</span>
     </button>
   );
 }
@@ -217,9 +326,10 @@ function Heart({ active, onClick }) {
 function ProductCard({ p }) {
   const nav = useNavigate();
   const { add } = useCart();
-  const fav = useFav();
-
   const goDetail = () => nav(`/item/${encodeURIComponent(p.sku)}`);
+
+  // 展示 roomType（替换原 color/material/keywords）
+  const roomLabel = Array.isArray(p.roomType) ? p.roomType.join(" · ") : (p.roomType || "-");
 
   return (
     <div style={{ ...S.card, position:"relative" }}>
@@ -233,11 +343,11 @@ function ProductCard({ p }) {
       </div>
 
       {/* 右上角收藏 */}
-      <Heart active={fav.has(p.sku)} onClick={() => fav.toggle(p.sku)} />
+      <Heart sku={p.sku} />
 
       <div style={{ padding: 12 }}>
         <div style={S.title}>{p.name}</div>
-        <div style={S.muted}>{[p.material, p.color].filter(Boolean).join(" · ")}</div>
+        <div style={S.muted}>{roomLabel}</div>
         <div style={S.price}>
           ${Number(p.unitPrice ?? p.price ?? 0).toFixed(2)}{" "}
           <span style={S.muted}>/ {p.unit || "usd/sqm"}</span>
@@ -251,13 +361,8 @@ function ProductCard({ p }) {
   );
 }
 
-
 /* ================= Recommendations ================= */
-function normalizeList(v) {
-  if (!v) return [];
-  if (Array.isArray(v)) return v;
-  return [String(v)];
-}
+function normalizeList(v) { if (!v) return []; return Array.isArray(v) ? v : [String(v)]; }
 function scoreForSeeds(item, seeds) {
   const kws = new Set(normalizeList(item.keywords).map(x => String(x).toLowerCase()));
   const rooms = new Set(normalizeList(item.roomType).map(x => String(x).toLowerCase()));
@@ -293,7 +398,13 @@ function Recommendations({ seeds, excludeSkus = [], limit = 8, title = "You may 
   return (
     <div style={{ marginTop: 24 }}>
       <div style={{ ...S.h3, marginBottom: 8 }}>{title}</div>
-      <div style={S.grid}>
+      <div
+        style={{
+          ...S.grid,
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 360px))",
+          justifyContent: "center"
+        }}
+      >
         {list.map(p => <ProductCard key={p.sku} p={p} />)}
       </div>
     </div>
@@ -389,8 +500,11 @@ function ProductsPage() {
   const [q, setQ] = useState("");
   const debQ = useDebounced(q, 300);
   const [open, setOpen] = useState(false);
-  const [filters, setFilters] = useState({ color: "", material: "", room: "" });
-  const [draft, setDraft] = useState({ color: "", material: "", room: "" });
+
+  // 新增：过滤与排序状态
+  const [filters, setFilters] = useState({ color: "", material: "", room: "", priceMin: 0, priceMax: 999999 });
+  const [draft, setDraft] = useState({ color: "", material: "", room: "", priceMin: 0, priceMax: 999999 });
+  const [sortBy, setSortBy] = useState("none"); // none | priceAsc | priceDesc
 
   useEffect(() => {
     let keep = true;
@@ -410,6 +524,22 @@ function ProductsPage() {
     return () => { keep = false; };
   }, [debQ]);
 
+  // 计算价格区间（min/max）
+  const priceStats = useMemo(() => {
+    const prices = list.map(x => Number(x.unitPrice ?? x.price ?? 0)).filter(n => !Number.isNaN(n));
+    const min = prices.length ? Math.min(...prices) : 0;
+    const max = prices.length ? Math.max(...prices) : 0;
+    return { min, max };
+  }, [list]);
+
+  // 初始化价格滑块范围
+  useEffect(() => {
+    if (priceStats.max >= priceStats.min) {
+      setFilters(f => ({ ...f, priceMin: priceStats.min, priceMax: priceStats.max }));
+      setDraft(d => ({ ...d, priceMin: priceStats.min, priceMax: priceStats.max }));
+    }
+  }, [priceStats.min, priceStats.max]);
+
   const optionSets = useMemo(() => {
     const colors = new Set(), materials = new Set(), rooms = new Set();
     for (const it of list) {
@@ -421,36 +551,67 @@ function ProductsPage() {
     return { colors: [...colors].sort(), materials: [...materials].sort(), rooms: [...rooms].sort() };
   }, [list]);
 
-  const filtered = useMemo(() => {
-    return list.filter(it => {
+  // 先过滤再排序
+  const filteredSorted = useMemo(() => {
+    let arr = list.filter(it => {
       const okColor = !filters.color || String(it.color || "").toLowerCase().includes(filters.color.toLowerCase());
       const okMat = !filters.material || String(it.material || "").toLowerCase().includes(filters.material.toLowerCase());
       const rt = Array.isArray(it.roomType) ? it.roomType.join(",") : (it.roomType || "");
       const okRoom = !filters.room || rt.toLowerCase().includes(filters.room.toLowerCase());
-      return okColor && okMat && okRoom;
+      const price = Number(it.unitPrice ?? it.price ?? 0);
+      const okPrice = price >= filters.priceMin && price <= filters.priceMax;
+      return okColor && okMat && okRoom && okPrice;
     });
-  }, [list, filters]);
+
+    if (sortBy === "priceAsc") arr = arr.slice().sort((a,b)=> (Number(a.unitPrice ?? a.price ?? 0) - Number(b.unitPrice ?? b.price ?? 0)));
+    if (sortBy === "priceDesc") arr = arr.slice().sort((a,b)=> (Number(b.unitPrice ?? b.price ?? 0) - Number(a.unitPrice ?? a.price ?? 0)));
+    return arr;
+  }, [list, filters, sortBy]);
+
+  // 双滑块防交叉
+  const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
   return (
     <div style={S.page}>
       <div style={{ ...S.hero, display: "flex", gap: 12, alignItems: "center", justifyContent: "space-between" }}>
         <input style={{ ...S.input, maxWidth: 480 }} placeholder="Search: wool carpet / tiles / rug / sku" value={q} onChange={e => setQ(e.target.value)} />
-        <button style={S.ghostBtn} onClick={() => { setDraft(filters); setOpen(true); }}>Filters ▾</button>
+
+        <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+          {/* Sort by price */}
+          <select value={sortBy} onChange={e=>setSortBy(e.target.value)} style={{ ...S.input, padding:"8px 10px", width: 180 }}>
+            <option value="none">Sort: Default</option>
+            <option value="priceAsc">Price ↑</option>
+            <option value="priceDesc">Price ↓</option>
+          </select>
+
+          <button style={S.ghostBtn} onClick={() => { setDraft(filters); setOpen(true); }}>Filters ▾</button>
+        </div>
       </div>
       {error && <div style={S.error}>{error}</div>}
       {loading && <div>Loading...</div>}
 
-      {(filters.color || filters.material || filters.room) && (
-        <div style={{ margin: "6px 0 10px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {(filters.color || filters.material || filters.room ||
+        filters.priceMin !== priceStats.min || filters.priceMax !== priceStats.max) && (
+        <div style={{ margin: "6px 0 10px", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           {filters.color && <Chip onClear={() => setFilters(p => ({ ...p, color: "" }))}>Color: {filters.color}</Chip>}
           {filters.material && <Chip onClear={() => setFilters(p => ({ ...p, material: "" }))}>Material: {filters.material}</Chip>}
           {filters.room && <Chip onClear={() => setFilters(p => ({ ...p, room: "" }))}>Room: {filters.room}</Chip>}
-          <button style={S.linkBtn} onClick={() => setFilters({ color: "", material: "", room: "" })}>Clear all</button>
+          {(filters.priceMin !== priceStats.min || filters.priceMax !== priceStats.max) && (
+            <Chip onClear={() => setFilters(p => ({ ...p, priceMin: priceStats.min, priceMax: priceStats.max }))}>
+              Price: ${filters.priceMin} - ${filters.priceMax}
+            </Chip>
+          )}
+          <button
+            style={S.linkBtn}
+            onClick={() => {
+              setFilters({ color: "", material: "", room: "", priceMin: priceStats.min, priceMax: priceStats.max });
+            }}
+          >Clear all</button>
         </div>
       )}
 
-      <div style={S.grid}>{filtered.map(p => <ProductCard key={p.sku} p={p} />)}</div>
-      {!loading && filtered.length === 0 && <div style={{ marginTop: 16 }}>No results.</div>}
+      <div style={S.grid}>{filteredSorted.map(p => <ProductCard key={p.sku} p={p} />)}</div>
+      {!loading && filteredSorted.length === 0 && <div style={{ marginTop: 16 }}>No results.</div>}
 
       {open && (
         <div style={S.panelMask} onClick={() => setOpen(false)}>
@@ -484,8 +645,60 @@ function ProductsPage() {
               </select>
             </div>
 
+            {/* 价格范围：双滑块 + 数值输入 */}
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>Price range (${priceStats.min} - ${priceStats.max})</div>
+
+              <div style={{ display: "grid", gap: 8 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  <input
+                    type="range"
+                    min={priceStats.min} max={priceStats.max}
+                    value={Math.min(draft.priceMin, draft.priceMax)}
+                    onChange={e => {
+                      const v = clamp(Number(e.target.value), priceStats.min, draft.priceMax);
+                      setDraft(d => ({ ...d, priceMin: v }));
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                  <input
+                    type="range"
+                    min={priceStats.min} max={priceStats.max}
+                    value={Math.max(draft.priceMin, draft.priceMax)}
+                    onChange={e => {
+                      const v = clamp(Number(e.target.value), draft.priceMin, priceStats.max);
+                      setDraft(d => ({ ...d, priceMax: v }));
+                    }}
+                    style={{ flex: 1 }}
+                  />
+                </div>
+
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    style={{ ...S.input, width: 120 }}
+                    type="number"
+                    value={draft.priceMin}
+                    onChange={e => {
+                      const v = clamp(Number(e.target.value), priceStats.min, draft.priceMax);
+                      setDraft(d => ({ ...d, priceMin: v }));
+                    }}
+                  />
+                  <span>to</span>
+                  <input
+                    style={{ ...S.input, width: 120 }}
+                    type="number"
+                    value={draft.priceMax}
+                    onChange={e => {
+                      const v = clamp(Number(e.target.value), draft.priceMin, priceStats.max);
+                      setDraft(d => ({ ...d, priceMax: v }));
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
             <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-              <button style={S.ghostBtn} onClick={() => setDraft({ color: "", material: "", room: "" })}>Clear</button>
+              <button style={S.ghostBtn} onClick={() => setDraft({ color: "", material: "", room: "", priceMin: priceStats.min, priceMax: priceStats.max })}>Clear</button>
               <button style={S.primaryBtn} onClick={() => { setFilters(draft); setOpen(false); }}>Apply</button>
             </div>
           </div>
@@ -504,19 +717,9 @@ function Chip({ children, onClear }) {
   );
 }
 
-// 若 Recommendations 未引入，避免 ReferenceError 直接白屏
+// 安全的推荐渲染
 const SafeRecommendations = (props) =>
   (typeof Recommendations !== "undefined" ? <Recommendations {...props} /> : null);
-
-// 若 FavoritesProvider 未包裹或 useFav 未导出，降级为 no-op，避免 “useFav is not a function”
-function useSafeFav() {
-  try {
-    // 如果项目里真的有 useFav，就用它
-    if (typeof useFav === "function") return useFav();
-  } catch (_) {}
-  // 否则提供空实现（不影响其它功能）
-  return { has: () => false, toggle: () => {} };
-}
 
 function DetailPage() {
   const { sku } = useParams();
@@ -525,7 +728,6 @@ function DetailPage() {
   const [error, setError] = useState("");
   const [showDelivery, setShowDelivery] = useState(false);
   const { add } = useCart();
-  const fav = useSafeFav();
 
   useEffect(() => {
     let keep = true;
@@ -548,6 +750,8 @@ function DetailPage() {
     rooms: normalizeList(p.roomType).map(x => String(x).toLowerCase())
   };
 
+  const roomLabel = Array.isArray(p.roomType) ? p.roomType.join(", ") : (p.roomType || "-");
+
   return (
     <div style={S.page}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
@@ -559,22 +763,15 @@ function DetailPage() {
             style={{ width: "100%", borderRadius: 16 }}
             onError={(e) => { e.currentTarget.src = "https://via.placeholder.com/800x480?text=YanCarpet"; }}
           />
-          <div style={{ position: "absolute", top: 10, right: 10 }}>
-            <Heart active={fav.has(p.sku)} onClick={() => fav.toggle(p.sku)} />
-          </div>
+          <Heart sku={p.sku} />
         </div>
 
         {/* 右：详情 */}
         <div>
           <div style={S.h2}>{p.name}</div>
           <div style={{ margin: "8px 0" }}>{p.description}</div>
-          <div style={S.muted}>Material: {p.material} · Color: {p.color}</div>
-          <div style={{ marginTop: 8 }}>
-            Room: {(Array.isArray(p.roomType) ? p.roomType.join(", ") : p.roomType) || "-"}
-          </div>
-          <div style={{ marginTop: 8 }}>
-            Sizes: {(p.sizeOptions || []).join(", ")}
-          </div>
+          <div style={S.muted}>Room: {roomLabel}</div>
+          <div style={{ marginTop: 8 }}>Sizes: {(p.sizeOptions || []).join(", ")}</div>
           <div style={{ marginTop: 12, fontSize: 18, fontWeight: 700 }}>
             ${Number(p.unitPrice ?? p.price ?? 0).toFixed(2)} <span style={S.muted}>/ {p.unit || "usd/sqm"}</span>
           </div>
@@ -603,7 +800,6 @@ function DetailPage() {
         </div>
       )}
 
-      {/* 推荐：组件存在就渲染，不存在就跳过，避免白屏 */}
       <SafeRecommendations
         seeds={seeds}
         excludeSkus={[p.sku]}
@@ -613,12 +809,10 @@ function DetailPage() {
   );
 }
 
-
 function CartPage() {
   const { items, remove, clear, total, inc, dec, updateQty } = useCart();
   const nav = useNavigate();
 
-  // 推荐：基于购物车里的 roomType / keywords 聚合
   const seeds = useMemo(() => {
     const rooms = new Set();
     const kw = new Set();
@@ -783,7 +977,6 @@ function PaySuccessPage() {
         Your order has been placed and paid. Order ID: <b>{orderId}</b>
       </div>
 
-      {/* 去掉 View order detail 按钮，只保留 Continue shopping */}
       <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
         <button style={S.primaryBtn} onClick={() => nav("/products")}>
           Continue shopping
@@ -793,14 +986,14 @@ function PaySuccessPage() {
   );
 }
 
-/* ================= Shell / Header ================= */
+/* ================= Header / Shell ================= */
 function HeaderBar() {
   const nav = useNavigate();
   const cart = useCart();
   const [authOpen, setAuthOpen] = useState(false);
   const [mode, setMode] = useState("login");
   const email = localStorage.getItem("yan_email");
-  const [menuOpen, setMenuOpen] = useState(false);   // ← 新增状态
+  const [menuOpen, setMenuOpen] = useState(false);
 
   const onAuthed = (token, em) => {
     localStorage.setItem("yan_token", token);
@@ -874,12 +1067,18 @@ function HeaderBar() {
             </div>
 
             <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-              <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); nav("/orders"); }}>
+              <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); window.location.href = "/orders"; }}>
                 Order history
               </button>
-              <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); nav("/favorites"); }}>
+              <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); window.location.href = "/favorites"; }}>
                 Favorites
               </button>
+              {!email && (
+                <>
+                  <button style={S.ghostBtn} onClick={() => { setMode("login"); setAuthOpen(true); }}>Sign in</button>
+                  <button style={S.ghostBtn} onClick={() => { setMode("register"); setAuthOpen(true); }}>Register</button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -890,6 +1089,98 @@ function HeaderBar() {
   );
 }
 
+function FavoritesPage() {
+  const { list } = useFav();
+  const skus = (list || []).map(x => x.sku);
+  const [items, setItems] = useState([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let keep = true;
+    (async () => {
+      try {
+        setLoading(true); setErr("");
+        const rows = [];
+        for (const sku of skus) {
+          try { rows.push(await api(`/items/${encodeURIComponent(sku)}`)); } catch {}
+        }
+        if (!keep) return;
+        setItems(rows);
+      } catch (e) { if (keep) setErr(e.message); } finally { if (keep) setLoading(false); }
+    })();
+    return () => { keep = false; };
+    // 用 join 让依赖可比对
+  }, [skus.join(",")]);
+
+  return (
+    <div style={S.page}>
+      <div style={S.h2}>Favorites</div>
+      {err && <div style={S.error}>{err}</div>}
+      {loading && <div>Loading...</div>}
+      {!loading && items.length === 0 && <div>No favorites yet.</div>}
+      <div
+        style={{
+          ...S.grid,
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 360px))",
+          justifyContent: "center"
+        }}
+      >
+        {items.map(p => <ProductCard key={p.sku} p={p} />)}
+      </div>
+    </div>
+  );
+}
+
+function OrdersPage() {
+  const [list, setList] = useState([]);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let keep = true;
+    (async () => {
+      try {
+        setLoading(true); setErr("");
+        const page = await api(`/orders/history?page=0&size=10`, { auth: true });
+        const rows =
+          Array.isArray(page) ? page :
+          Array.isArray(page?.content) ? page.content :
+          Array.isArray(page?.items) ? page.items :
+          [];
+        if (!keep) return;
+        setList(rows);
+      } catch (e) { if (keep) setErr(e.message); } finally { if (keep) setLoading(false); }
+    })();
+    return () => { keep = false; };
+  }, []);
+
+  return (
+    <div style={S.page}>
+      <div style={S.h2}>Order history</div>
+      {err && <div style={S.error}>{err}</div>}
+      {loading && <div>Loading...</div>}
+      {!loading && list.length === 0 && <div>No orders yet.</div>}
+      <div style={{ display: "grid", gap: 12 }}>
+        {list.map(o => (
+          <div key={o.orderId} style={{ background:"#fff", border:`1px solid ${S._border}`, borderRadius:12, padding:12 }}>
+            <div style={{ fontWeight:800 }}>Order {o.orderId}</div>
+            <div style={S.muted}>
+              Status: {o.status} · Total: ${Number(o.totalAmount||0).toFixed(2)} · {o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}
+            </div>
+            <div style={{ marginTop: 8 }}>
+              {(o.items||[]).map((it, idx) => (
+                <div key={idx} style={{ padding:"4px 0", borderBottom:"1px dashed #eee" }}>
+                  {it.name || it.sku} × {it.quantity} — ${Number(it.price||0).toFixed(2)}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /* ================= Shell / Routes ================= */
 function Shell() {
@@ -909,7 +1200,6 @@ function Shell() {
           <Route path="/contact" element={<ContactPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/favorites" element={<FavoritesPage />} />
-
         </Routes>
       </main>
       <footer style={S.footer}>© {new Date().getFullYear()} YanCarpet</footer>
@@ -956,112 +1246,6 @@ Address: No336, Yanling Road, Jiangyin City, Jiangsu Province, China.`}
     </div>
   );
 }
-function FavoritesPage() {
-  const { skus } = useFav();
-  const [items, setItems] = useState([]);
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let keep = true;
-    (async () => {
-      try {
-        setLoading(true); setErr("");
-        // 简单逐个拉取；数量多时可以做批量接口 /items?skus=...
-        const rows = [];
-        for (const sku of skus) {
-          try {
-            const it = await api(`/items/${encodeURIComponent(sku)}`);
-            rows.push(it);
-          } catch {}
-        }
-        if (!keep) return;
-        setItems(rows);
-      } catch (e) {
-        if (keep) setErr(e.message);
-      } finally {
-        if (keep) setLoading(false);
-      }
-    })();
-    return () => { keep = false; };
-  }, [skus]);
-
-  return (
-    <div style={S.page}>
-      <div style={S.h2}>Favorites</div>
-      {err && <div style={S.error}>{err}</div>}
-      {loading && <div>Loading...</div>}
-      {!loading && items.length === 0 && <div>No favorites yet.</div>}
-      <div style={S.grid}>
-        {items.map(p => <ProductCard key={p.sku} p={p} />)}
-      </div>
-    </div>
-  );
-}
-
-function OrdersPage() {
-  const [list, setList] = useState([]);
-  const [err, setErr] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    let keep = true;
-    (async () => {
-      try {
-        setLoading(true); setErr("");
-
-        // 如果后端已经提供分页的 /orders/history?page=0&size=10（需要鉴权）
-        const page = await api(`/orders/history?page=0&size=10`, { auth: true });
-
-        // 兼容几种常见返回结构：
-        // 1) Spring Data Page: { content: [...], totalElements, ... }
-        // 2) 数组直接返回: [...]
-        // 3) 包在 data/items 的情况
-        const rows =
-          Array.isArray(page) ? page :
-          Array.isArray(page?.content) ? page.content :
-          Array.isArray(page?.items) ? page.items :
-          [];
-
-        if (!keep) return;
-        setList(rows);
-      } catch (e) {
-        if (keep) setErr(e.message);
-      } finally {
-        if (keep) setLoading(false);
-      }
-    })();
-    return () => { keep = false; };
-  }, []);
-
-  return (
-    <div style={S.page}>
-      <div style={S.h2}>Order history</div>
-      {err && <div style={S.error}>{err}</div>}
-      {loading && <div>Loading...</div>}
-      {!loading && list.length === 0 && <div>No orders yet.</div>}
-      <div style={{ display: "grid", gap: 12 }}>
-        {list.map(o => (
-          <div key={o.orderId} style={{ background:"#fff", border:`1px solid ${S._border}`, borderRadius:12, padding:12 }}>
-            <div style={{ fontWeight:800 }}>Order {o.orderId}</div>
-            <div style={S.muted}>
-              Status: {o.status} · Total: ${Number(o.totalAmount||0).toFixed(2)} · {o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}
-            </div>
-            <div style={{ marginTop: 8 }}>
-              {(o.items||[]).map((it, idx) => (
-                <div key={idx} style={{ padding:"4px 0", borderBottom:"1px dashed #eee" }}>
-                  {it.name || it.sku} × {it.quantity} — ${Number(it.price||0).toFixed(2)}
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-
 
 /* ================= Styles ================= */
 const S = {
@@ -1100,21 +1284,20 @@ const S = {
 };
 
 /* ================= Mount ================= */
- function App() {
-   return (
-     <BrowserRouter>
-       <GlobalStyle />
-       <ToastProvider>
-
+function App() {
+  return (
+    <BrowserRouter>
+      <GlobalStyle />
+      <ToastProvider>
         <FavoritesProvider>
           <CartProvider>
             <Shell />
           </CartProvider>
         </FavoritesProvider>
-       </ToastProvider>
-     </BrowserRouter>
-   );
- }
+      </ToastProvider>
+    </BrowserRouter>
+  );
+}
 
 const container = document.getElementById("root");
 createRoot(container).render(<App />);
