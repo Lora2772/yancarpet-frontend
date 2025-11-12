@@ -1073,6 +1073,11 @@ function HeaderBar() {
               <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); window.location.href = "/favorites"; }}>
                 Favorites
               </button>
+              {email && (
+                <button style={S.ghostBtn} onClick={() => { setMenuOpen(false); window.location.href = "/account"; }}>
+                  My Account
+                </button>
+              )}
               {!email && (
                 <>
                   <button style={S.ghostBtn} onClick={() => { setMode("login"); setAuthOpen(true); }}>Sign in</button>
@@ -1132,28 +1137,107 @@ function FavoritesPage() {
   );
 }
 
+/* ================= Reusable Form Components ================= */
+function AddressForm({ initialAddress = {}, onSubmit, onCancel, loading = false }) {
+  const [form, setForm] = useState({
+    line1: initialAddress.line1 || "",
+    line2: initialAddress.line2 || "",
+    city: initialAddress.city || "",
+    stateOrProvince: initialAddress.stateOrProvince || "",
+    postalCode: initialAddress.postalCode || "",
+    country: initialAddress.country || ""
+  });
+
+  const handleSubmit = () => onSubmit(form);
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <input style={S.input} placeholder="Address Line 1" value={form.line1} onChange={e => setForm({...form, line1: e.target.value})} />
+      <input style={S.input} placeholder="Address Line 2 (optional)" value={form.line2} onChange={e => setForm({...form, line2: e.target.value})} />
+      <input style={S.input} placeholder="City" value={form.city} onChange={e => setForm({...form, city: e.target.value})} />
+      <input style={S.input} placeholder="State/Province" value={form.stateOrProvince} onChange={e => setForm({...form, stateOrProvince: e.target.value})} />
+      <input style={S.input} placeholder="Postal Code" value={form.postalCode} onChange={e => setForm({...form, postalCode: e.target.value})} />
+      <input style={S.input} placeholder="Country" value={form.country} onChange={e => setForm({...form, country: e.target.value})} />
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={S.primaryBtn} onClick={handleSubmit} disabled={loading}>
+          {loading ? "Saving..." : "Save"}
+        </button>
+        <button style={S.ghostBtn} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function PaymentMethodForm({ initialPayment = {}, onSubmit, onCancel, loading = false }) {
+  const [form, setForm] = useState({
+    type: initialPayment.type || "CARD",
+    maskedDetail: initialPayment.maskedDetail || ""
+  });
+
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <select style={S.input} value={form.type} onChange={e => setForm({...form, type: e.target.value})}>
+        <option value="CARD">Credit/Debit Card</option>
+        <option value="WECHAT_QR">WeChat Pay</option>
+        <option value="ALIPAY_QR">Alipay</option>
+      </select>
+
+      <input style={S.input} placeholder="Masked Detail (e.g., VISA **** 1234)" value={form.maskedDetail} onChange={e => setForm({...form, maskedDetail: e.target.value})} />
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={S.primaryBtn} onClick={() => onSubmit(form)} disabled={loading}>
+          {loading ? "Saving..." : "Save"}
+        </button>
+        <button style={S.ghostBtn} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function OrdersPage() {
   const [list, setList] = useState([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
+  const [editingOrderId, setEditingOrderId] = useState(null);
+  const [updateLoading, setUpdateLoading] = useState(false);
+  const [updateErr, setUpdateErr] = useState("");
+  const toast = useContext(ToastCtx);
+
+  const loadOrders = async () => {
+    try {
+      setLoading(true); setErr("");
+      const page = await api(`/orders/history?page=0&size=10`, { auth: true });
+      const rows =
+        Array.isArray(page) ? page :
+        Array.isArray(page?.content) ? page.content :
+        Array.isArray(page?.items) ? page.items :
+        [];
+      setList(rows);
+    } catch (e) { setErr(e.message); } finally { setLoading(false); }
+  };
 
   useEffect(() => {
     let keep = true;
-    (async () => {
-      try {
-        setLoading(true); setErr("");
-        const page = await api(`/orders/history?page=0&size=10`, { auth: true });
-        const rows =
-          Array.isArray(page) ? page :
-          Array.isArray(page?.content) ? page.content :
-          Array.isArray(page?.items) ? page.items :
-          [];
-        if (!keep) return;
-        setList(rows);
-      } catch (e) { if (keep) setErr(e.message); } finally { if (keep) setLoading(false); }
-    })();
+    loadOrders().catch(() => {});
     return () => { keep = false; };
   }, []);
+
+  const handleUpdateAddress = async (orderId, addressData) => {
+    try {
+      setUpdateLoading(true); setUpdateErr("");
+      await api.put(`/orders/${orderId}/shipping-address`, addressData, { auth: true });
+      toast.add("Shipping address updated successfully!");
+      setEditingOrderId(null);
+      await loadOrders();
+    } catch (e) {
+      setUpdateErr(e.message);
+    } finally {
+      setUpdateLoading(false);
+    }
+  };
+
+  const editingOrder = list.find(o => o.orderId === editingOrderId);
 
   return (
     <div style={S.page}>
@@ -1168,6 +1252,14 @@ function OrdersPage() {
             <div style={S.muted}>
               Status: {o.status} · Total: ${Number(o.totalAmount||0).toFixed(2)} · {o.createdAt ? new Date(o.createdAt).toLocaleString() : ""}
             </div>
+            {o.shippingAddress && (
+              <div style={{ marginTop: 8, fontSize: 14, color: "#666" }}>
+                <div><b>Shipping Address:</b></div>
+                <div>{o.shippingAddress.line1}{o.shippingAddress.line2 ? ", " + o.shippingAddress.line2 : ""}</div>
+                <div>{o.shippingAddress.city}, {o.shippingAddress.stateOrProvince} {o.shippingAddress.postalCode}</div>
+                <div>{o.shippingAddress.country}</div>
+              </div>
+            )}
             <div style={{ marginTop: 8 }}>
               {(o.items||[]).map((it, idx) => (
                 <div key={idx} style={{ padding:"4px 0", borderBottom:"1px dashed #eee" }}>
@@ -1175,8 +1267,190 @@ function OrdersPage() {
                 </div>
               ))}
             </div>
+            {(o.status === "RESERVED" || o.status === "PAID") && (
+              <button
+                style={{ ...S.ghostBtn, marginTop: 8 }}
+                onClick={() => setEditingOrderId(o.orderId)}
+              >
+                Edit Shipping Address
+              </button>
+            )}
           </div>
         ))}
+      </div>
+
+      {editingOrderId && (
+        <div style={S.modalBackdrop} onClick={() => setEditingOrderId(null)}>
+          <div style={S.modalCard} onClick={e => e.stopPropagation()}>
+            <div style={S.h3}>Update Shipping Address</div>
+            <div style={{ marginBottom: 12, color: "#666" }}>Order: {editingOrderId}</div>
+            {updateErr && <div style={S.error}>{updateErr}</div>}
+            <AddressForm
+              initialAddress={editingOrder?.shippingAddress || {}}
+              onSubmit={(data) => handleUpdateAddress(editingOrderId, data)}
+              onCancel={() => setEditingOrderId(null)}
+              loading={updateLoading}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================= My Account Page ================= */
+function AccountPage() {
+  const [account, setAccount] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [editMode, setEditMode] = useState(null); // "shipping" | "billing" | "payment"
+  const [updateLoading, setUpdateLoading] = useState(false);
+  const [updateErr, setUpdateErr] = useState("");
+  const toast = useContext(ToastCtx);
+
+  const loadAccount = async () => {
+    try {
+      setLoading(true); setError("");
+      const data = await api.get("/account/me", { auth: true });
+      setAccount(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAccount().catch(() => {});
+  }, []);
+
+  const handleUpdateAccount = async (updates) => {
+    try {
+      setUpdateLoading(true); setUpdateErr("");
+      await api.put("/account/me", updates, { auth: true });
+      toast.add("Account updated successfully!");
+      setEditMode(null);
+      await loadAccount();
+    } catch (e) {
+      setUpdateErr(e.message);
+    } finally {
+      setUpdateLoading(false);
+    }
+  };
+
+  if (loading) return <div style={S.page}>Loading...</div>;
+  if (error) return <div style={S.page}><div style={S.error}>{error}</div></div>;
+  if (!account) return <div style={S.page}>Account not found.</div>;
+
+  return (
+    <div style={S.page}>
+      <div style={S.h2}>My Account</div>
+
+      {/* User Info */}
+      <div style={{ background: "#fff", border: `1px solid ${S._border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={S.h3}>Account Information</div>
+        <div style={{ marginTop: 8 }}>
+          <div><b>Email:</b> {account.email}</div>
+          <div><b>Name:</b> {account.userName || "Not set"}</div>
+        </div>
+      </div>
+
+      {/* Shipping Address */}
+      <div style={{ background: "#fff", border: `1px solid ${S._border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={S.h3}>Shipping Address</div>
+          {editMode !== "shipping" && (
+            <button style={S.linkBtn} onClick={() => setEditMode("shipping")}>Edit</button>
+          )}
+        </div>
+        {editMode === "shipping" ? (
+          <div style={{ marginTop: 12 }}>
+            {updateErr && <div style={S.error}>{updateErr}</div>}
+            <AddressForm
+              initialAddress={account.shippingAddress || {}}
+              onSubmit={(data) => handleUpdateAccount({ shippingAddress: data })}
+              onCancel={() => setEditMode(null)}
+              loading={updateLoading}
+            />
+          </div>
+        ) : (
+          <div style={{ marginTop: 8, color: "#666" }}>
+            {account.shippingAddress ? (
+              <>
+                <div>{account.shippingAddress.line1}{account.shippingAddress.line2 ? ", " + account.shippingAddress.line2 : ""}</div>
+                <div>{account.shippingAddress.city}, {account.shippingAddress.stateOrProvince} {account.shippingAddress.postalCode}</div>
+                <div>{account.shippingAddress.country}</div>
+              </>
+            ) : (
+              <div style={{ fontStyle: "italic" }}>No shipping address set</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Billing Address */}
+      <div style={{ background: "#fff", border: `1px solid ${S._border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={S.h3}>Billing Address</div>
+          {editMode !== "billing" && (
+            <button style={S.linkBtn} onClick={() => setEditMode("billing")}>Edit</button>
+          )}
+        </div>
+        {editMode === "billing" ? (
+          <div style={{ marginTop: 12 }}>
+            {updateErr && <div style={S.error}>{updateErr}</div>}
+            <AddressForm
+              initialAddress={account.billingAddress || {}}
+              onSubmit={(data) => handleUpdateAccount({ billingAddress: data })}
+              onCancel={() => setEditMode(null)}
+              loading={updateLoading}
+            />
+          </div>
+        ) : (
+          <div style={{ marginTop: 8, color: "#666" }}>
+            {account.billingAddress ? (
+              <>
+                <div>{account.billingAddress.line1}{account.billingAddress.line2 ? ", " + account.billingAddress.line2 : ""}</div>
+                <div>{account.billingAddress.city}, {account.billingAddress.stateOrProvince} {account.billingAddress.postalCode}</div>
+                <div>{account.billingAddress.country}</div>
+              </>
+            ) : (
+              <div style={{ fontStyle: "italic" }}>No billing address set</div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Payment Method */}
+      <div style={{ background: "#fff", border: `1px solid ${S._border}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={S.h3}>Payment Method</div>
+          {editMode !== "payment" && (
+            <button style={S.linkBtn} onClick={() => setEditMode("payment")}>Edit</button>
+          )}
+        </div>
+        {editMode === "payment" ? (
+          <div style={{ marginTop: 12 }}>
+            {updateErr && <div style={S.error}>{updateErr}</div>}
+            <PaymentMethodForm
+              initialPayment={account.defaultPaymentMethod || {}}
+              onSubmit={(data) => handleUpdateAccount({ defaultPaymentMethod: data })}
+              onCancel={() => setEditMode(null)}
+              loading={updateLoading}
+            />
+          </div>
+        ) : (
+          <div style={{ marginTop: 8, color: "#666" }}>
+            {account.defaultPaymentMethod ? (
+              <>
+                <div><b>Type:</b> {account.defaultPaymentMethod.type}</div>
+                <div><b>Details:</b> {account.defaultPaymentMethod.maskedDetail}</div>
+              </>
+            ) : (
+              <div style={{ fontStyle: "italic" }}>No payment method set</div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1200,6 +1474,7 @@ function Shell() {
           <Route path="/contact" element={<ContactPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/favorites" element={<FavoritesPage />} />
+          <Route path="/account" element={<AccountPage />} />
         </Routes>
       </main>
       <footer style={S.footer}>© {new Date().getFullYear()} YanCarpet</footer>
