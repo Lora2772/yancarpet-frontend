@@ -887,24 +887,18 @@ function CartPage() {
 }
 
 function CheckoutPage() {
-  const { items, total, clear } = useCart();
+  const { items, total } = useCart();
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const nav = useNavigate();
 
-  const placeOrder = async () => {
+  const createOrder = async () => {
     try {
       setLoading(true); setErr("");
       const email = localStorage.getItem("yan_email");
       if (!email) throw new Error("Please sign in first (top-right).");
       const order = await api("/orders", { method: "POST", body: { customerEmail: email, items }, auth: true });
-      await api("/payments/submit", {
-        method: "POST",
-        auth: true,
-        body: { orderId: order.orderId, paymentMethod: "CARD", amount: Number(total.toFixed(2)) }
-      });
-      clear();
-      nav(`/success/${order.orderId}`);
+      nav(`/payment/${order.orderId}`);
     } catch (e) { setErr(e.message); } finally { setLoading(false); }
   };
 
@@ -915,10 +909,168 @@ function CheckoutPage() {
       <div>Items: <b>{items.length}</b> · Total: <b>${total.toFixed(2)}</b></div>
       {err && <div style={S.error}>{err}</div>}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button style={S.primaryBtn} disabled={loading || items.length === 0} onClick={placeOrder}>
+        <button style={S.primaryBtn} disabled={loading || items.length === 0} onClick={createOrder}>
           {loading ? "Processing..." : "Pay with Card"}
         </button>
         <button style={S.ghostBtn} onClick={() => nav("/cart")}>Back to cart</button>
+      </div>
+    </div>
+  );
+}
+
+function PaymentPage() {
+  const { orderId } = useParams();
+  const { clear } = useCart();
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const nav = useNavigate();
+  const toast = useToast();
+
+  const [cardNumber, setCardNumber] = useState("");
+  const [cvv, setCvv] = useState("");
+  const [expiration, setExpiration] = useState("");
+
+  const [cardErr, setCardErr] = useState("");
+  const [cvvErr, setCvvErr] = useState("");
+  const [expErr, setExpErr] = useState("");
+
+  const validateCard = () => {
+    let valid = true;
+    setCardErr(""); setCvvErr(""); setExpErr("");
+
+    // Card number: must be digits only, length 13-19
+    if (!cardNumber) {
+      setCardErr("Card number is required");
+      valid = false;
+    } else if (!/^\d+$/.test(cardNumber)) {
+      setCardErr("Card number must contain digits only");
+      valid = false;
+    } else if (cardNumber.length < 13 || cardNumber.length > 19) {
+      setCardErr("Card number must be 13-19 digits");
+      valid = false;
+    }
+
+    // CVV: must be digits only, length 3-4
+    if (!cvv) {
+      setCvvErr("CVV is required");
+      valid = false;
+    } else if (!/^\d+$/.test(cvv)) {
+      setCvvErr("CVV must contain digits only");
+      valid = false;
+    } else if (cvv.length < 3 || cvv.length > 4) {
+      setCvvErr("CVV must be 3-4 digits");
+      valid = false;
+    }
+
+    // Expiration: must be digits only, format MM/YY (5 chars with slash) or MMYY (4 digits)
+    if (!expiration) {
+      setExpErr("Expiration date is required");
+      valid = false;
+    } else {
+      const cleaned = expiration.replace(/\D/g, "");
+      if (cleaned.length !== 4) {
+        setExpErr("Expiration must be 4 digits (MMYY)");
+        valid = false;
+      } else if (!/^\d+$/.test(cleaned)) {
+        setExpErr("Expiration must contain digits only");
+        valid = false;
+      }
+    }
+
+    return valid;
+  };
+
+  const submitPayment = async () => {
+    if (!validateCard()) {
+      toast.add("Please fix validation errors");
+      return;
+    }
+
+    try {
+      setLoading(true); setErr("");
+
+      // Get order to get total amount
+      const order = await api(`/orders/${encodeURIComponent(orderId)}`, { auth: true });
+
+      await api("/payments/submit", {
+        method: "POST",
+        auth: true,
+        body: {
+          orderId,
+          paymentMethod: "CARD",
+          amount: Number(order.totalAmount || 0)
+        }
+      });
+
+      clear();
+      nav(`/success/${orderId}`);
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={S.page}>
+      <div style={S.h2}>Payment</div>
+      <div style={{ marginBottom: 12 }}>Order ID: <b>{orderId}</b></div>
+
+      <div style={{ maxWidth: 480, background: "#fff", border: `1px solid ${S._border}`, borderRadius: 12, padding: 16 }}>
+        <div style={{ marginBottom: 16 }}>
+          <label style={{ display: "block", fontWeight: 700, marginBottom: 6 }}>Card Number</label>
+          <input
+            style={{ ...S.input, borderColor: cardErr ? "#dc2626" : "#ddd" }}
+            placeholder="1234567890123456"
+            value={cardNumber}
+            onChange={e => setCardNumber(e.target.value)}
+            maxLength={19}
+          />
+          {cardErr && <div style={{ color: "#dc2626", fontSize: 14, marginTop: 4 }}>{cardErr}</div>}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+          <div>
+            <label style={{ display: "block", fontWeight: 700, marginBottom: 6 }}>CVV</label>
+            <input
+              style={{ ...S.input, borderColor: cvvErr ? "#dc2626" : "#ddd" }}
+              placeholder="123"
+              value={cvv}
+              onChange={e => setCvv(e.target.value)}
+              maxLength={4}
+            />
+            {cvvErr && <div style={{ color: "#dc2626", fontSize: 14, marginTop: 4 }}>{cvvErr}</div>}
+          </div>
+
+          <div>
+            <label style={{ display: "block", fontWeight: 700, marginBottom: 6 }}>Expiration (MM/YY)</label>
+            <input
+              style={{ ...S.input, borderColor: expErr ? "#dc2626" : "#ddd" }}
+              placeholder="12/25"
+              value={expiration}
+              onChange={e => {
+                let val = e.target.value.replace(/\D/g, "");
+                if (val.length >= 2) val = val.slice(0, 2) + "/" + val.slice(2, 4);
+                setExpiration(val);
+              }}
+              maxLength={5}
+            />
+            {expErr && <div style={{ color: "#dc2626", fontSize: 14, marginTop: 4 }}>{expErr}</div>}
+          </div>
+        </div>
+
+        {err && <div style={S.error}>{err}</div>}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          <button
+            style={S.primaryBtn}
+            disabled={loading}
+            onClick={submitPayment}
+          >
+            {loading ? "Processing..." : "Submit Payment"}
+          </button>
+          <button style={S.ghostBtn} onClick={() => nav("/checkout")}>Cancel</button>
+        </div>
       </div>
     </div>
   );
@@ -935,7 +1087,7 @@ function OrderDetailPage() {
     (async () => {
       try {
         setLoading(true); setError("");
-        const data = await api(`/orders/${encodeURIComponent(orderId)}`);
+        const data = await api(`/orders/${encodeURIComponent(orderId)}`, { auth: true });
         if (!keep) return; setOrder(data);
       } catch (e) { if (keep) setError(e.message); } finally { if (keep) setLoading(false); }
     })();
@@ -1468,6 +1620,7 @@ function Shell() {
           <Route path="/item/:sku" element={<DetailPage />} />
           <Route path="/cart" element={<CartPage />} />
           <Route path="/checkout" element={<CheckoutPage />} />
+          <Route path="/payment/:orderId" element={<PaymentPage />} />
           <Route path="/orders/:orderId" element={<OrderDetailPage />} />
           <Route path="/success/:orderId" element={<PaySuccessPage />} />
           <Route path="/about" element={<AboutPage />} />
