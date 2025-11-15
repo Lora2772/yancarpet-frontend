@@ -1247,8 +1247,8 @@ function HeaderBar() {
 }
 
 function FavoritesPage() {
-  const { list } = useFav();
-  const skus = (list || []).map(x => x.sku);
+  const favCtx = useFav();
+  const list = favCtx?.list || [];
   const [items, setItems] = useState([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(true);
@@ -1258,17 +1258,33 @@ function FavoritesPage() {
     (async () => {
       try {
         setLoading(true); setErr("");
+        if (list.length === 0) {
+          if (keep) {
+            setItems([]);
+            setLoading(false);
+          }
+          return;
+        }
         const rows = [];
-        for (const sku of skus) {
-          try { rows.push(await api(`/items/${encodeURIComponent(sku)}`)); } catch {}
+        for (const fav of list) {
+          if (!fav?.sku) continue;
+          try {
+            const item = await api(`/items/${encodeURIComponent(fav.sku)}`);
+            if (item) rows.push(item);
+          } catch (e) {
+            console.warn(`Failed to load item ${fav.sku}:`, e);
+          }
         }
         if (!keep) return;
         setItems(rows);
-      } catch (e) { if (keep) setErr(e.message); } finally { if (keep) setLoading(false); }
+      } catch (e) {
+        if (keep) setErr(e.message);
+      } finally {
+        if (keep) setLoading(false);
+      }
     })();
     return () => { keep = false; };
-    // 用 join 让依赖可比对
-  }, [skus.join(",")]);
+  }, [list.length, JSON.stringify(list.map(f => f.sku))]);
 
   return (
     <div style={S.page}>
@@ -1283,7 +1299,7 @@ function FavoritesPage() {
           justifyContent: "center"
         }}
       >
-        {items.map(p => <ProductCard key={p.sku} p={p} />)}
+        {items.filter(p => p && p.sku).map(p => <ProductCard key={p.sku} p={p} />)}
       </div>
     </div>
   );
