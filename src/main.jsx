@@ -1389,6 +1389,13 @@ function OrdersPage() {
     }
   };
 
+  const handleCancelOrder = (orderId) => {
+    // Remove the order from the list
+    setList(prevList => prevList.filter(o => o.orderId !== orderId));
+    // Show toast notification
+    toast.add("Order is canceled");
+  };
+
   const editingOrder = list.find(o => o.orderId === editingOrderId);
 
   return (
@@ -1419,14 +1426,22 @@ function OrdersPage() {
                 </div>
               ))}
             </div>
-            {(o.status === "RESERVED" || o.status === "PAID") && (
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              {(o.status === "RESERVED" || o.status === "PAID") && (
+                <button
+                  style={S.ghostBtn}
+                  onClick={() => setEditingOrderId(o.orderId)}
+                >
+                  Edit Shipping Address
+                </button>
+              )}
               <button
-                style={{ ...S.ghostBtn, marginTop: 8 }}
-                onClick={() => setEditingOrderId(o.orderId)}
+                style={S.ghostBtn}
+                onClick={() => handleCancelOrder(o.orderId)}
               >
-                Edit Shipping Address
+                Cancel Order
               </button>
-            )}
+            </div>
           </div>
         ))}
       </div>
