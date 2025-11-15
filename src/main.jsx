@@ -1365,7 +1365,9 @@ function OrdersPage() {
         Array.isArray(page?.content) ? page.content :
         Array.isArray(page?.items) ? page.items :
         [];
-      setList(rows);
+      // Filter out cancelled orders
+      const activeOrders = rows.filter(order => order.status !== "CANCELLED");
+      setList(activeOrders);
     } catch (e) { setErr(e.message); } finally { setLoading(false); }
   };
 
@@ -1389,11 +1391,19 @@ function OrdersPage() {
     }
   };
 
-  const handleCancelOrder = (orderId) => {
-    // Remove the order from the list
-    setList(prevList => prevList.filter(o => o.orderId !== orderId));
-    // Show toast notification
-    toast.add("Order is canceled");
+  const handleCancelOrder = async (orderId) => {
+    try {
+      // Call backend API to cancel order and release inventory
+      await api.post(`/orders/${orderId}/cancel`, null, { auth: true });
+      // Remove the order from the list
+      setList(prevList => prevList.filter(o => o.orderId !== orderId));
+      // Show toast notification
+      toast.add("Order is canceled");
+    } catch (e) {
+      // Show error if cancellation fails
+      toast.add(`Failed to cancel order: ${e.message}`);
+      setErr(e.message);
+    }
   };
 
   const editingOrder = list.find(o => o.orderId === editingOrderId);
